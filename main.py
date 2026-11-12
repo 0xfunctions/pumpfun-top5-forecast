@@ -21,8 +21,8 @@ N_SIM = 1500  # per read
 # momentum never helped (MOM 0 beat 0.2/0.5/1.0 at every sd) and a wider base sd helped (0.35 > 0.22 > 0.15).
 MOM = 0.0  # momentum weight
 SD0 = 0.35  # base idiosyncratic sd, log10
-TOP_POOL = 60  # coins simulated
-SHRINK = 0.92  # never put full mass on named coins
+TOP_POOL = 200  # coins simulated (the history lists at most 200 per mark)
+N_MIN_DEBUTS = 3  # fewer observed contender debuts than this: fall back to the Gaussian newcomer prior
 FLOOR_BIN = 0.002
 
 
@@ -77,6 +77,23 @@ def main():
         coins.append((r["mint"], s, slope))
     s5 = sorted((c[1] for c in coins), reverse=True)[min(places, len(coins)) - 1]
 
+    # Newcomer debuts: the first time each coin shows in the chart (from the 2nd mark on: the 1st holds everything
+    # already big). Only contenders (within 1 log10 of the current #5) can reach the top 5; their count per hour sets
+    # the arrival rate, their first-seen sizes the debut distribution (heavy tailed, unlike the old Gaussian).
+    # Long histories: the chart starts empty, so early marks inflate "first seen"; the rate uses the later half only.
+    start = len(marks) // 2 if len(marks) >= 24 else 0
+    seen, debuts = {r["mint"] for m in marks[: start + 1] for r in m["rows"]}, []
+    for m in marks[start + 1 :]:
+        for r in m["rows"]:
+            if r["mint"] not in seen:
+                seen.add(r["mint"])
+                debuts.append(cap(r))
+    debuts = [d for d in debuts if d >= s5 - 1.0]
+    span_h = max((t_last - ts(marks[start]["at"])) / 3600.0, 0.1)
+    rate = len(debuts) / span_h
+    use_debuts = len(debuts) >= N_MIN_DEBUTS
+    shrink = max(0.6, 0.92 - 0.02 * (sum(horizons) / len(horizons)))  # more mass unnamed the further out
+
     rng = random.Random(20261112)
     cnt = {c[0]: [0.0] * places for c in coins}
     size_hist = [[0.0] * nbins for _ in range(places)]
@@ -91,9 +108,9 @@ def main():
         return nbins - 1
 
     for h in horizons:
-        sd_i = SD0 + 0.05 * min(h, 12)  # idiosyncratic
+        sd_i = math.sqrt(SD0 * SD0 + 0.03 * min(h, 12))  # idiosyncratic, random-walk-like growth
         sd_m = 0.08 + 0.01 * min(h, 12)  # shared market
-        lam_new = 0.5 * min(h, 12)
+        lam_new = rate * h if use_debuts else 0.5 * min(h, 12)
         for _ in range(N_SIM):
             shock = rng.gauss(0, sd_m)
             sims = []
@@ -101,7 +118,12 @@ def main():
                 drift = max(-0.3, min(0.3, MOM * slope * min(h, 2.0)))
                 sims.append((s + drift + shock + rng.gauss(0, sd_i), mint))
             for _k in range(poisson(rng, lam_new)):
-                sims.append((s5 - 0.2 + rng.gauss(0, 0.5) + shock, None))
+                if use_debuts:  # debut size from history, then noise for its random age before the read
+                    age = rng.random() * h
+                    v = rng.choice(debuts) + rng.gauss(0, math.sqrt(0.01 + 0.03 * age)) + shock
+                else:
+                    v = s5 - 0.2 + rng.gauss(0, 0.5) + shock
+                sims.append((v, None))
             sims.sort(key=lambda x: -x[0])
             for k in range(min(places, len(sims))):
                 v, mint = sims[k]
@@ -119,7 +141,7 @@ def main():
     probs = []
     for mint, _s, _sl in coins:
         for k in range(places):
-            p = math.floor(cnt[mint][k] / total_sims * SHRINK * 1e6) / 1e6
+            p = math.floor(cnt[mint][k] / total_sims * shrink * 1e6) / 1e6
             if p >= 0.004:
                 probs.append({"mint": mint, "place": k + 1, "p": p})
     # keep each place's sum <= 1 and at most 100 rows (SHRINK already guarantees the sum)
