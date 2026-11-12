@@ -17,6 +17,10 @@ from datetime import datetime
 IN = os.environ.get("MAKEFUN_INPUT_DIR", "/input")
 OUT = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
 N_SIM = 1500  # per read
+# Backtest on the practice marks (history cut at 3 points, next marks as truth, order score):
+# momentum never helped (MOM 0 beat 0.2/0.5/1.0 at every sd) and a wider base sd helped (0.35 > 0.22 > 0.15).
+MOM = 0.0  # momentum weight
+SD0 = 0.35  # base idiosyncratic sd, log10
 TOP_POOL = 60  # coins simulated
 SHRINK = 0.92  # never put full mass on named coins
 FLOOR_BIN = 0.002
@@ -87,14 +91,14 @@ def main():
         return nbins - 1
 
     for h in horizons:
-        sd_i = 0.22 + 0.05 * min(h, 12)  # idiosyncratic
+        sd_i = SD0 + 0.05 * min(h, 12)  # idiosyncratic
         sd_m = 0.08 + 0.01 * min(h, 12)  # shared market
         lam_new = 0.5 * min(h, 12)
         for _ in range(N_SIM):
             shock = rng.gauss(0, sd_m)
             sims = []
             for mint, s, slope in coins:
-                drift = max(-0.3, min(0.3, 0.2 * slope * min(h, 2.0)))
+                drift = max(-0.3, min(0.3, MOM * slope * min(h, 2.0)))
                 sims.append((s + drift + shock + rng.gauss(0, sd_i), mint))
             for _k in range(poisson(rng, lam_new)):
                 sims.append((s5 - 0.2 + rng.gauss(0, 0.5) + shock, None))
